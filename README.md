@@ -56,7 +56,7 @@ A feature-rich command-line application for creating, managing, and visualizing 
 1. Clone this repository
 2. Install dependencies:
    ```
-   npm install
+   npm install chalk@^4.1.2 fuse.js@^7.1.0 inquirer@^8.2.6 papaparse@^5.5.2 uuid@^11.1.0
    ```
 3. Run the application:
    ```
