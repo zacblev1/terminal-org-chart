@@ -2,228 +2,410 @@
 
 const chalk = require('chalk');
 const inquirer = require('inquirer');
-const fs = require('fs');
+const fs = require('fs').promises;  // Async FS
 const path = require('path');
 
-// Define the Employee class to represent each node in the org chart
+const { v4: uuidv4 } = require('uuid'); // For unique employee IDs
+const Fuse = require('fuse.js');        // For fuzzy search
+const Papa = require('papaparse');      // For CSV parsing
+
+// ===========================
+// Employee Class
+// ===========================
 class Employee {
   constructor(
     name,
     title,
-    level = 0,
     lob = '',
     division = '',
     dept = '',
-    email = ''
+    email = '',
+    manager = null
   ) {
+    this.id = uuidv4();       // Unique ID
     this.name = name;
     this.title = title;
-    this.level = level;
-    this.lob = lob;          // new
-    this.division = division; // new
-    this.dept = dept;        // new
-    this.email = email;      // new
+    this.lob = lob;
+    this.division = division;
+    this.dept = dept;
+    this.email = email;
+    this.manager = manager;
     this.reports = [];
+    this.level = manager ? manager.level + 1 : 0;
   }
 
   // Add a direct report to this employee
   addReport(employee) {
+    employee.manager = this;
     employee.level = this.level + 1;
     this.reports.push(employee);
     return this;
   }
 }
 
-// Class to handle the org chart operations
+// ===========================
+// OrgChart Class
+// ===========================
 class OrgChart {
   constructor() {
-    this.root = null;
-    this.employees = {};
+    this.root = null;        // CEO or top-level
+    this.employees = {};     // Store employees by ID
+    this.history = [];       // For undo
+    this.future = [];        // For redo
   }
 
-  // Set the CEO/root of the organization
+  // -------------------------
+  // Undo/Redo Helpers
+  // -------------------------
+  /**
+   * Push the current org structure onto a history stack
+   * so we can revert to it later (undo).
+   */
+  pushState() {
+    const snapshot = this._serializeOrg();
+    this.history.push(snapshot);
+    // Clear the "redo" stack when a new action is taken
+    this.future = [];
+  }
+
+  /**
+   * Undo: revert to the previous snapshot if available
+   */
+  undo() {
+    if (this.history.length < 2) {
+      console.log(chalk.yellow('Nothing to undo.'));
+      return false;
+    }
+    // Remove current state, push it into future
+    const current = this.history.pop();
+    this.future.push(current);
+
+    // The last item in history is now the prior state
+    const previous = this.history[this.history.length - 1];
+    this._loadSnapshot(previous);
+    console.log(chalk.green('Undo successful.'));
+    return true;
+  }
+
+  /**
+   * Redo: re-apply a state that was undone
+   */
+  redo() {
+    if (this.future.length === 0) {
+      console.log(chalk.yellow('Nothing to redo.'));
+      return false;
+    }
+    // Pop from future into history, load it
+    const snapshot = this.future.pop();
+    this.history.push(snapshot);
+    this._loadSnapshot(snapshot);
+    console.log(chalk.green('Redo successful.'));
+    return true;
+  }
+
+  // Helper to convert entire org to JSON string
+  _serializeOrg() {
+    // We'll use the root node's nested structure
+    return JSON.stringify(this._prepareForExport(), null, 2);
+  }
+
+  // Helper to reload org from a JSON snapshot
+  _loadSnapshot(snapshot) {
+    const orgObj = JSON.parse(snapshot);
+    this.employees = {};
+    this._recreateFromJSON(orgObj);
+  }
+
+  // -------------------------
+  // Basic Org Methods
+  // -------------------------
   setRoot(employee) {
     this.root = employee;
-    this.employees[employee.name] = employee;
+    this.employees[employee.id] = employee;
+    // Push initial state
+    this.pushState();
   }
 
-  // Add an employee to the org chart
-  addEmployee(name, title, managerName, lob, division, dept, email) {
-    const employee = new Employee(name, title, 0, lob, division, dept, email);
-    this.employees[name] = employee;
-
-    if (managerName && this.employees[managerName]) {
-      this.employees[managerName].addReport(employee);
+  /**
+   * Add a new employee under managerId. If managerId is null or undefined,
+   * but we already have a root, default to root.
+   */
+  addEmployee(name, title, managerId, lob, division, dept, email) {
+    // If we have no root, block creation until setRoot is used
+    if (!this.root) {
+      console.log(chalk.red('No CEO/root exists. Create a new org chart first.'));
+      return null;
     }
 
+    this.pushState(); // Before we modify
+
+    let manager = this.employees[managerId];
+    if (!manager) {
+      // If not found or no manager specified, default to root
+      manager = this.root;
+    }
+
+    const employee = new Employee(name, title, lob, division, dept, email, manager);
+    manager.addReport(employee);
+    this.employees[employee.id] = employee;
+
+    console.log(chalk.green(`Employee "${name}" added under "${manager.name}"`));
     return employee;
   }
 
-  // Remove an employee and reassign their reports
-  removeEmployee(name, newManagerName) {
-    if (!this.employees[name]) return false;
+  /**
+   * Remove an employee by ID. Optionally reassign their reports to newManagerId.
+   * If newManagerId is not provided, their reports are left orphaned
+   * or removed from the org (depending on your business rules).
+   */
+  removeEmployee(employeeId, newManagerId = null) {
+    // Block if they try to remove the root
+    if (this.root && this.root.id === employeeId) {
+      console.log(chalk.red('Cannot remove the root (CEO).'));
+      return false;
+    }
 
-    const employee = this.employees[name];
-    const manager = this._findManager(name);
+    const employee = this.employees[employeeId];
+    if (!employee) {
+      console.log(chalk.red('Employee not found.'));
+      return false;
+    }
 
-    // If there's a new manager, reassign reports
-    if (newManagerName && this.employees[newManagerName]) {
-      employee.reports.forEach((report) => {
-        this.employees[newManagerName].addReport(report);
+    this.pushState();
+
+    // Reassign direct reports if needed
+    if (newManagerId && this.employees[newManagerId]) {
+      const newManager = this.employees[newManagerId];
+      employee.reports.forEach((r) => {
+        newManager.addReport(r);
+      });
+    } else {
+      // If no reassignment, we detach them (their manager set to null),
+      // or remove them from org entirely. Here we just remove them from org:
+      employee.reports.forEach((r) => {
+        // removing them as well or making them root might be custom logic
+        r.manager = null;
       });
     }
 
-    // Remove employee from manager's reports
-    if (manager) {
-      manager.reports = manager.reports.filter((e) => e.name !== name);
+    // Remove from old manager's reports
+    if (employee.manager) {
+      employee.manager.reports = employee.manager.reports.filter(
+        (r) => r.id !== employee.id
+      );
     }
 
-    // Remove employee from employees dictionary
-    delete this.employees[name];
+    // Finally, remove from dictionary
+    delete this.employees[employeeId];
+
+    console.log(chalk.green(`Removed "${employee.name}".`));
     return true;
   }
 
-  // Find who manages a given employee
-  _findManager(employeeName) {
-    for (const name in this.employees) {
-      const employee = this.employees[name];
-      if (employee.reports.some((e) => e.name === employeeName)) {
-        return employee;
-      }
-    }
-    return null;
-  }
-
-  // Edit an employee’s details
-  editEmployee(oldName, newData) {
-    // Check if the employee exists
-    if (!this.employees[oldName]) return false;
-
-    // If name is being changed, we need to re-key in `this.employees`
-    const employee = this.employees[oldName];
-
-    // If the name changed, we also need to update the "employees" dictionary key
-    if (newData.name && newData.name.trim() !== '' && newData.name !== oldName) {
-      // Prevent overwriting if there's already someone with the new name
-      if (this.employees[newData.name]) {
-        throw new Error(`An employee named "${newData.name}" already exists!`);
-      }
-
-      // Remove the old key and set the new key
-      delete this.employees[oldName];
-      this.employees[newData.name] = employee;
-
-      // If someone else was managing this employee, update the reference in manager.reports
-      const manager = this._findManager(oldName);
-      if (manager) {
-        const idx = manager.reports.findIndex((r) => r.name === oldName);
-        if (idx !== -1) {
-          manager.reports[idx].name = newData.name;
-        }
-      }
+  /**
+   * Edit an employee’s details by ID.
+   * If the name changes, we just overwrite the name in the object.
+   */
+  editEmployee(employeeId, newData) {
+    const employee = this.employees[employeeId];
+    if (!employee) {
+      console.log(chalk.red(`Employee with ID "${employeeId}" not found.`));
+      return false;
     }
 
-    // Update fields
-    employee.name = newData.name ?? employee.name;
-    employee.title = newData.title ?? employee.title;
-    employee.lob = newData.lob ?? employee.lob;
-    employee.division = newData.division ?? employee.division;
-    employee.dept = newData.dept ?? employee.dept;
-    employee.email = newData.email ?? employee.email;
+    this.pushState();
 
+    // Just update fields if they’re provided
+    if (typeof newData.name === 'string') {
+      employee.name = newData.name.trim() || employee.name;
+    }
+    if (typeof newData.title === 'string') {
+      employee.title = newData.title.trim() || employee.title;
+    }
+    if (typeof newData.lob === 'string') {
+      employee.lob = newData.lob.trim() || employee.lob;
+    }
+    if (typeof newData.division === 'string') {
+      employee.division = newData.division.trim() || employee.division;
+    }
+    if (typeof newData.dept === 'string') {
+      employee.dept = newData.dept.trim() || employee.dept;
+    }
+    if (typeof newData.email === 'string') {
+      employee.email = newData.email.trim() || employee.email;
+    }
+
+    console.log(chalk.green(`Employee "${employee.name}" updated.`));
     return true;
   }
 
-  // Search for employees by name, title, LOB, division, dept, or email
-  search(query) {
-    query = query.toLowerCase();
-    const results = [];
-
-    for (const name in this.employees) {
-      const e = this.employees[name];
-      // Add more match criteria as needed
-      if (
-        e.name.toLowerCase().includes(query) ||
-        e.title.toLowerCase().includes(query) ||
-        (e.lob && e.lob.toLowerCase().includes(query)) ||
-        (e.division && e.division.toLowerCase().includes(query)) ||
-        (e.dept && e.dept.toLowerCase().includes(query)) ||
-        (e.email && e.email.toLowerCase().includes(query))
-      ) {
-        results.push(e);
-      }
+  /**
+   * Move an entire subtree (employee + reports) under a new manager.
+   */
+  moveSubtree(employeeId, newManagerId) {
+    const employee = this.employees[employeeId];
+    const newManager = this.employees[newManagerId];
+    if (!employee || !newManager) {
+      console.log(chalk.red('Invalid employee or manager ID.'));
+      return false;
     }
 
-    return results;
+    // Prevent moving the root
+    if (employee === this.root) {
+      console.log(chalk.red('Cannot move the root (CEO).'));
+      return false;
+    }
+
+    // Check if newManager is a descendant of employee (which would create a cycle)
+    if (employee === newManager || this._isDescendant(employee, newManager)) {
+      console.log(chalk.red('Cannot reassign to a subordinate or self.'));
+      return false;
+    }
+
+    this.pushState();
+
+    // 1) Remove from old manager
+    if (employee.manager) {
+      employee.manager.reports = employee.manager.reports.filter((r) => r !== employee);
+    }
+
+    // 2) Add to new manager
+    newManager.addReport(employee);
+
+    // 3) Update levels in subtree
+    this._updateLevels(employee, newManager.level + 1);
+
+    console.log(chalk.green(`Moved "${employee.name}" under "${newManager.name}".`));
+    return true;
   }
 
-  // Get an employee's full path from root (for org hierarchy)
-  getPath(employeeName) {
+  // Helper to check if candidate is a descendant of root
+  _isDescendant(root, candidate) {
+    if (root.reports.length === 0) return false;
+    for (const r of root.reports) {
+      if (r === candidate) return true;
+      if (this._isDescendant(r, candidate)) return true;
+    }
+    return false;
+  }
+
+  // Recursive update of levels
+  _updateLevels(node, level) {
+    node.level = level;
+    node.reports.forEach((r) => this._updateLevels(r, level + 1));
+  }
+
+  /**
+   * Get the chain of managers up to the root for a given employee.
+   */
+  getPath(employeeId) {
     const path = [];
-    let current = this.employees[employeeName];
-
-    if (!current) return path;
-
-    // Add the employee
-    path.unshift(current);
-
-    // Add all managers up to the root
-    let manager = this._findManager(current.name);
-    while (manager) {
-      path.unshift(manager);
-      manager = this._findManager(manager.name);
+    let current = this.employees[employeeId];
+    while (current) {
+      path.unshift(current);
+      current = current.manager; // direct manager reference
     }
-
     return path;
   }
 
-  // Print the org chart in the terminal
+  // -------------------------
+  // Searching (Fuzzy & Basic)
+  // -------------------------
+  /**
+   * Fuzzy search across name, title, lob, division, dept, email.
+   */
+  search(query) {
+    const employeesArray = Object.values(this.employees);
+    const fuse = new Fuse(employeesArray, {
+      keys: ['name', 'title', 'lob', 'division', 'dept', 'email'],
+      includeScore: true,
+      threshold: 0.3 // Adjust threshold for how fuzzy you want the match
+    });
+    const results = fuse.search(query);
+    return results.map((r) => r.item);
+  }
+
+  // -------------------------
+  // Printing
+  // -------------------------
   print() {
     if (!this.root) {
       console.log(chalk.red('Organization chart is empty. Add a CEO first.'));
       return;
     }
-
     this._printNode(this.root, '', true);
   }
 
-  // Helper method to print a node and its subtree
   _printNode(node, prefix, isTail) {
-    // Print current node
     const connector = isTail ? '└── ' : '├── ';
     console.log(
       `${prefix}${connector}${chalk.green(node.name)} ${chalk.blue(`(${node.title})`)}`
     );
-
-    // Prepare prefix for children
     const childPrefix = prefix + (isTail ? '    ' : '│   ');
-
-    // Print children
-    const lastIdx = node.reports.length - 1;
     node.reports.forEach((report, idx) => {
-      this._printNode(report, childPrefix, idx === lastIdx);
+      this._printNode(report, childPrefix, idx === node.reports.length - 1);
     });
   }
 
-  // Export the org chart to a JSON file
-  exportToJSON(filename) {
-    // Instead of directly stringifying this.root,
-    // we can create a custom serialization that includes extra fields.
-    const data = JSON.stringify(this.root, null, 2);
-    fs.writeFileSync(filename, data);
-    console.log(chalk.green(`Org chart exported to ${filename}`));
+  // Print a subtree given an employee
+  printSubtree(employee) {
+    this._printSubtree(employee, '', true);
   }
 
-  // Import an org chart from a JSON file
-  importFromJSON(filename) {
-    try {
-      const data = fs.readFileSync(filename, 'utf8');
-      const obj = JSON.parse(data);
+  _printSubtree(node, prefix, isTail) {
+    // Basic text output, no coloring for capturing in logs
+    const connector = isTail ? '└── ' : '├── ';
+    console.log(`${prefix}${connector}${node.name} (${node.title})`);
+    const childPrefix = prefix + (isTail ? '    ' : '│   ');
+    node.reports.forEach((report, idx) => {
+      this._printSubtree(report, childPrefix, idx === node.reports.length - 1);
+    });
+  }
 
-      // Recreate the org chart from the JSON data
+  // -------------------------
+  // Export/Import
+  // -------------------------
+  async exportToJSON(filename) {
+    if (!this.root) {
+      console.log(chalk.red('No org chart to export.'));
+      return;
+    }
+    try {
+      const data = JSON.stringify(this._prepareForExport(), null, 2);
+      await fs.writeFile(filename, data, 'utf8');
+      console.log(chalk.green(`Org chart exported to ${filename}`));
+    } catch (err) {
+      console.log(chalk.red(`Error exporting: ${err.message}`));
+    }
+  }
+
+  /**
+   * Convert the root (and subtree) to a plain JS object
+   * that includes all fields, so we can fully reconstruct it.
+   */
+  _prepareForExport() {
+    const serializeNode = (node) => ({
+      id: node.id,
+      name: node.name,
+      title: node.title,
+      lob: node.lob,
+      division: node.division,
+      dept: node.dept,
+      email: node.email,
+      level: node.level,
+      reports: node.reports.map(serializeNode)
+    });
+    return serializeNode(this.root);
+  }
+
+  async importFromJSON(filename) {
+    try {
+      const data = await fs.readFile(filename, 'utf8');
+      const obj = JSON.parse(data);
       this.employees = {};
       this._recreateFromJSON(obj);
-
+      // After successful import, push state to history
+      this.pushState();
       console.log(chalk.green(`Org chart imported from ${filename}`));
       return true;
     } catch (err) {
@@ -232,44 +414,113 @@ class OrgChart {
     }
   }
 
-  // Helper method to recreate the org chart from JSON
   _recreateFromJSON(obj, manager = null) {
-    // Note: We also restore lob, division, dept, email if present
     const employee = new Employee(
       obj.name,
       obj.title,
-      obj.level,
-      obj.lob || '',
-      obj.division || '',
-      obj.dept || '',
-      obj.email || ''
+      obj.lob,
+      obj.division,
+      obj.dept,
+      obj.email,
+      manager
     );
-    this.employees[obj.name] = employee;
+    // Overwrite auto-generated ID with the one from the JSON
+    employee.id = obj.id;
+    employee.level = obj.level; // can recalc if you want
+    this.employees[employee.id] = employee;
 
     if (!manager) {
       this.root = employee;
     } else {
-      manager.addReport(employee);
+      manager.reports.push(employee);
     }
 
     if (obj.reports && obj.reports.length > 0) {
-      obj.reports.forEach((report) => {
-        this._recreateFromJSON(report, employee);
+      obj.reports.forEach((child) => {
+        this._recreateFromJSON(child, employee);
       });
     }
-
     return employee;
+  }
+
+  // -------------------------
+  // CSV Import
+  // -------------------------
+  /**
+   * Load employees in bulk from a CSV.
+   * Each row should have columns:
+   *   name, title, managerName, lob, division, dept, email
+   * If managerName is missing or not found, we default to root.
+   */
+  async importFromCSV(filename) {
+    try {
+      const fileData = await fs.readFile(filename, 'utf8');
+      const parsed = Papa.parse(fileData, { header: true });
+      const rows = parsed.data;
+
+      if (!rows || !rows.length) {
+        console.log(chalk.yellow('CSV file is empty or invalid format.'));
+        return false;
+      }
+
+      this.pushState();
+
+      rows.forEach((row) => {
+        const name = row.name?.trim() || '';
+        const title = row.title?.trim() || '';
+        const managerName = row.managerName?.trim() || '';
+        const lob = row.lob?.trim() || '';
+        const division = row.division?.trim() || '';
+        const dept = row.dept?.trim() || '';
+        const email = row.email?.trim() || '';
+
+        if (!name || !title) {
+          // Skip invalid row
+          return;
+        }
+
+        // Find manager by name
+        let managerId = null;
+        // Attempt to find manager in existing employees by name
+        const manager = Object.values(this.employees).find(
+          (emp) => emp.name.toLowerCase() === managerName.toLowerCase()
+        );
+        if (manager) {
+          managerId = manager.id;
+        }
+
+        this.addEmployee(name, title, managerId, lob, division, dept, email);
+      });
+
+      console.log(chalk.green(`Imported from CSV: ${rows.length} rows processed.`));
+      return true;
+    } catch (err) {
+      console.error(chalk.red(`Error importing CSV: ${err.message}`));
+      return false;
+    }
   }
 }
 
-// Main application class
+// ===========================
+// OrgChartApp Class
+// ===========================
 class OrgChartApp {
   constructor() {
     this.orgChart = new OrgChart();
-    this.currentFile = null;
+    this.currentFile = null; // track current JSON file
   }
 
-  // Display the main menu
+  async run() {
+    console.log(chalk.bold.green('Welcome to Terminal Org Chart!'));
+
+    let running = true;
+    while (running) {
+      running = await this.mainMenu();
+    }
+
+    console.log(chalk.bold.green('Thank you for using Terminal Org Chart!'));
+  }
+
   async mainMenu() {
     console.clear();
     console.log(chalk.bold.cyan('===== Terminal Org Chart ====='));
@@ -284,15 +535,19 @@ class OrgChartApp {
         name: 'action',
         message: 'What would you like to do?',
         choices: [
-          { name: 'Create a new org chart', value: 'new' },
+          { name: 'Create a new org chart (set a CEO)', value: 'new' },
           { name: 'Add an employee', value: 'add' },
-          { name: 'Edit an employee', value: 'edit' }, // <--- NEW
+          { name: 'Edit an employee', value: 'edit' },
+          { name: 'Move a subtree (reassign a manager)', value: 'move' },
           { name: 'Remove an employee', value: 'remove' },
           { name: 'Display org chart', value: 'display' },
-          { name: 'Search employees', value: 'search' },
-          { name: 'Save org chart', value: 'save' },
-          { name: 'Load org chart', value: 'load' },
-          { name: 'Print reports', value: 'print' },
+          { name: 'Search employees (fuzzy)', value: 'search' },
+          { name: 'Undo last action', value: 'undo' },
+          { name: 'Redo last undone action', value: 'redo' },
+          { name: 'Save org chart (JSON)', value: 'save' },
+          { name: 'Load org chart (JSON)', value: 'load' },
+          { name: 'Import from CSV', value: 'importCSV' },
+          { name: 'Print various reports', value: 'printMenu' },
           { name: 'Exit', value: 'exit' }
         ]
       }
@@ -308,6 +563,9 @@ class OrgChartApp {
       case 'edit':
         await this.editEmployee();
         break;
+      case 'move':
+        await this.moveSubtree();
+        break;
       case 'remove':
         await this.removeEmployee();
         break;
@@ -317,21 +575,30 @@ class OrgChartApp {
       case 'search':
         await this.searchEmployees();
         break;
+      case 'undo':
+        this.orgChart.undo();
+        break;
+      case 'redo':
+        this.orgChart.redo();
+        break;
       case 'save':
         await this.saveOrgChart();
         break;
       case 'load':
         await this.loadOrgChart();
         break;
-      case 'print':
+      case 'importCSV':
+        await this.importFromCSV();
+        break;
+      case 'printMenu':
         await this.printMenu();
         break;
       case 'exit':
         return false;
     }
 
-    // Prompt to continue
     if (action !== 'exit') {
+      // Wait for user to press Enter
       await inquirer.prompt([
         {
           type: 'confirm',
@@ -342,11 +609,12 @@ class OrgChartApp {
       ]);
       return true;
     }
-
     return false;
   }
 
-  // Create a new org chart
+  // =========================
+  // Org Functions
+  // =========================
   async createNewOrgChart() {
     console.clear();
     console.log(chalk.bold.yellow('Create a New Org Chart'));
@@ -390,31 +658,30 @@ class OrgChartApp {
       }
     ]);
 
+    // Reset the entire chart
     this.orgChart = new OrgChart();
-    const ceo = new Employee(name, title, 0, lob, division, dept, email);
+    const ceo = new Employee(name, title, lob, division, dept, email, null);
     this.orgChart.setRoot(ceo);
     this.currentFile = null;
 
     console.log(chalk.green(`Created a new org chart with ${name} as the root`));
   }
 
-  // Add an employee to the org chart
   async addEmployee() {
     if (!this.orgChart.root) {
       console.log(chalk.red('Please create a new org chart first'));
       return;
     }
-
     console.clear();
     console.log(chalk.bold.yellow('Add an Employee'));
 
-    // Get available managers
+    // Prepare manager choices
     const managerChoices = Object.values(this.orgChart.employees).map((e) => ({
       name: `${e.name} (${e.title})`,
-      value: e.name
+      value: e.id
     }));
 
-    const { name, title, managerName, lob, division, dept, email } =
+    const { name, title, managerId, lob, division, dept, email } =
       await inquirer.prompt([
         {
           type: 'input',
@@ -430,7 +697,7 @@ class OrgChartApp {
         },
         {
           type: 'list',
-          name: 'managerName',
+          name: 'managerId',
           message: 'Select their manager:',
           choices: managerChoices
         },
@@ -460,21 +727,19 @@ class OrgChartApp {
         }
       ]);
 
-    this.orgChart.addEmployee(name, title, managerName, lob, division, dept, email);
-    console.log(chalk.green(`Added ${name} reporting to ${managerName}`));
+    this.orgChart.addEmployee(name, title, managerId, lob, division, dept, email);
   }
 
-  // NEW: Edit an existing employee
   async editEmployee() {
     if (!this.orgChart.root) {
       console.log(chalk.red('Please create a new org chart first'));
       return;
     }
+    console.log(chalk.bold.yellow('Edit an Employee'));
 
-    // Exclude the possibility that there are no employees
     const employeeChoices = Object.values(this.orgChart.employees).map((e) => ({
       name: `${e.name} (${e.title})`,
-      value: e.name
+      value: e.id
     }));
 
     if (employeeChoices.length === 0) {
@@ -482,22 +747,21 @@ class OrgChartApp {
       return;
     }
 
-    const { employeeName } = await inquirer.prompt([
+    const { employeeId } = await inquirer.prompt([
       {
         type: 'list',
-        name: 'employeeName',
+        name: 'employeeId',
         message: 'Select the employee to edit:',
         choices: employeeChoices
       }
     ]);
 
-    const employee = this.orgChart.employees[employeeName];
+    const employee = this.orgChart.employees[employeeId];
     if (!employee) {
       console.log(chalk.red('Employee not found.'));
       return;
     }
 
-    // Ask for new info; if empty, we'll leave the field unchanged
     const answers = await inquirer.prompt([
       {
         type: 'input',
@@ -537,41 +801,80 @@ class OrgChartApp {
       }
     ]);
 
-    try {
-      this.orgChart.editEmployee(employeeName, answers);
-      console.log(chalk.green(`Employee "${employeeName}" updated successfully.`));
-    } catch (err) {
-      console.log(chalk.red(`Error updating employee: ${err.message}`));
-    }
+    this.orgChart.editEmployee(employeeId, answers);
   }
 
-  // Remove an employee from the org chart
+  async moveSubtree() {
+    if (!this.orgChart.root) {
+      console.log(chalk.red('Please create a new org chart first'));
+      return;
+    }
+    console.log(chalk.bold.yellow('Move a Subtree'));
+
+    // Choose an employee to move (except the root)
+    const employeeChoices = Object.values(this.orgChart.employees)
+      .filter((e) => e !== this.orgChart.root)
+      .map((e) => ({
+        name: `${e.name} (${e.title})`,
+        value: e.id
+      }));
+
+    if (employeeChoices.length === 0) {
+      console.log(chalk.yellow('No subtree to move (only the CEO exists).'));
+      return;
+    }
+
+    const { employeeId } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'employeeId',
+        message: 'Select the employee (subtree root) to move:',
+        choices: employeeChoices
+      }
+    ]);
+
+    const managerChoices = Object.values(this.orgChart.employees)
+      .filter((e) => e.id !== employeeId)
+      .map((e) => ({
+        name: `${e.name} (${e.title})`,
+        value: e.id
+      }));
+
+    const { newManagerId } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'newManagerId',
+        message: 'Select the new manager:',
+        choices: managerChoices
+      }
+    ]);
+
+    this.orgChart.moveSubtree(employeeId, newManagerId);
+  }
+
   async removeEmployee() {
     if (!this.orgChart.root) {
       console.log(chalk.red('Please create a new org chart first'));
       return;
     }
-
-    console.clear();
     console.log(chalk.bold.yellow('Remove an Employee'));
 
-    // Get employees who can be removed (exclude the root)
     const employeeChoices = Object.values(this.orgChart.employees)
       .filter((e) => e !== this.orgChart.root)
       .map((e) => ({
         name: `${e.name} (${e.title})`,
-        value: e.name
+        value: e.id
       }));
 
     if (employeeChoices.length === 0) {
-      console.log(chalk.yellow('No employees to remove (only the CEO exists)'));
+      console.log(chalk.yellow('No employees to remove (only the CEO exists).'));
       return;
     }
 
-    const { name, reassignReports } = await inquirer.prompt([
+    const { employeeId, reassignReports } = await inquirer.prompt([
       {
         type: 'list',
-        name: 'name',
+        name: 'employeeId',
         message: 'Select the employee to remove:',
         choices: employeeChoices
       },
@@ -583,346 +886,69 @@ class OrgChartApp {
       }
     ]);
 
-    let newManagerName = null;
-
+    let newManagerId = null;
     if (reassignReports) {
-      // Get potential new managers (exclude the employee being removed)
       const managerChoices = Object.values(this.orgChart.employees)
-        .filter((e) => e.name !== name)
+        .filter((e) => e.id !== employeeId)
         .map((e) => ({
           name: `${e.name} (${e.title})`,
-          value: e.name
+          value: e.id
         }));
 
-      const { manager } = await inquirer.prompt([
+      const { managerId } = await inquirer.prompt([
         {
           type: 'list',
-          name: 'manager',
-          message: 'Select the new manager for their reports:',
+          name: 'managerId',
+          message: 'Select the new manager for their direct reports:',
           choices: managerChoices
         }
       ]);
-
-      newManagerName = manager;
+      newManagerId = managerId;
     }
 
-    this.orgChart.removeEmployee(name, newManagerName);
-    console.log(chalk.green(`Removed ${name} from the org chart`));
+    this.orgChart.removeEmployee(employeeId, newManagerId);
   }
 
-  // Display the org chart
   displayOrgChart() {
     console.clear();
     console.log(chalk.bold.yellow('Organization Chart'));
-
-    if (!this.orgChart.root) {
-      console.log(chalk.red('Org chart is empty. Please create one first.'));
-      return;
-    }
-
     this.orgChart.print();
   }
 
-  // Search for employees
   async searchEmployees() {
     if (!this.orgChart.root) {
       console.log(chalk.red('Org chart is empty. Please create one first.'));
       return;
     }
-
     console.clear();
-    console.log(chalk.bold.yellow('Search Employees'));
+    console.log(chalk.bold.yellow('Search (Fuzzy) Employees'));
 
     const { query } = await inquirer.prompt([
       {
         type: 'input',
         name: 'query',
-        message: 'Enter search term (name, title, LOB, etc.):',
+        message: 'Enter search term:',
         validate: (input) => input.trim() !== '' || 'Search term cannot be empty'
       }
     ]);
 
     const results = this.orgChart.search(query);
-
-    if (results.length === 0) {
-      console.log(chalk.yellow(`No employees found matching "${query}"`));
+    if (!results.length) {
+      console.log(chalk.yellow(`No matches found for "${query}".`));
       return;
     }
 
-    console.log(
-      chalk.green(`Found ${results.length} employee(s) matching "${query}":`)
-    );
-
-    results.forEach((employee, index) => {
+    console.log(chalk.green(`Found ${results.length} matches:`));
+    results.forEach((emp, idx) => {
       console.log(
-        chalk.bold(`\n${index + 1}. ${chalk.green(employee.name)} - ${chalk.blue(employee.title)}`)
+        chalk.bold(`${idx + 1}. ${emp.name} (${emp.title}) - [ID: ${emp.id}]`)
       );
-
-      // Show other info
-      console.log(`   LOB: ${chalk.cyan(employee.lob || 'N/A')}`);
-      console.log(`   Division: ${chalk.cyan(employee.division || 'N/A')}`);
-      console.log(`   Department: ${chalk.cyan(employee.dept || 'N/A')}`);
-      console.log(`   Email: ${chalk.cyan(employee.email || 'N/A')}`);
-
-      // Show who they report to
-      const manager = this.orgChart._findManager(employee.name);
-      if (manager) {
-        console.log(
-          `   Reports to: ${chalk.cyan(manager.name)} (${manager.title})`
-        );
-      } else {
-        console.log(`   Reports to: ${chalk.gray('None (Top of organization)')}`);
-      }
-
-      // Show their direct reports
-      if (employee.reports.length > 0) {
-        console.log(`   Direct reports: ${employee.reports.length}`);
-        employee.reports.forEach((report) => {
-          console.log(`     - ${chalk.cyan(report.name)} (${report.title})`);
-        });
-      } else {
-        console.log(`   Direct reports: ${chalk.gray('None')}`);
-      }
-    });
-
-    // Allow viewing detailed info for one of the results
-    if (results.length > 0) {
-      const { viewDetails } = await inquirer.prompt([
-        {
-          type: 'confirm',
-          name: 'viewDetails',
-          message:
-            'Would you like to view detailed information for one of these employees?',
-          default: false
-        }
-      ]);
-
-      if (viewDetails) {
-        const { employeeIndex } = await inquirer.prompt([
-          {
-            type: 'list',
-            name: 'employeeIndex',
-            message: 'Select an employee:',
-            choices: results.map((e, i) => ({
-              name: `${e.name} (${e.title})`,
-              value: i
-            }))
-          }
-        ]);
-
-        await this.displayEmployeeDetails(results[employeeIndex].name);
-      }
-    }
-  }
-
-  // Display detailed information about an employee
-  async displayEmployeeDetails(employeeName) {
-    const employee = this.orgChart.employees[employeeName];
-    if (!employee) return;
-
-    console.clear();
-    console.log(chalk.bold.yellow(`Employee Details: ${employee.name}`));
-
-    // Basic information
-    console.log(chalk.bold('\nBasic Information:'));
-    console.log(`Name: ${chalk.green(employee.name)}`);
-    console.log(`Title: ${chalk.blue(employee.title)}`);
-    console.log(`LOB: ${chalk.cyan(employee.lob || 'N/A')}`);
-    console.log(`Division: ${chalk.cyan(employee.division || 'N/A')}`);
-    console.log(`Department: ${chalk.cyan(employee.dept || 'N/A')}`);
-    console.log(`Email: ${chalk.cyan(employee.email || 'N/A')}`);
-    console.log(
-      `Level: ${chalk.cyan(employee.level)} ${
-        employee.level === 0 ? '(Top level)' : ''
-      }`
-    );
-
-    // Organization path
-    console.log(chalk.bold('\nOrganizational Hierarchy:'));
-    const path = this.orgChart.getPath(employee.name);
-
-    if (path.length > 0) {
-      path.forEach((pathEmployee, index) => {
-        const indent = '  '.repeat(index);
-        console.log(
-          `${indent}${
-            index === path.length - 1 ? '└─ ' : '├─ '
-          }${chalk.green(pathEmployee.name)} (${pathEmployee.title})`
-        );
-      });
-    }
-
-    // Direct reports
-    console.log(chalk.bold('\nDirect Reports:'));
-    if (employee.reports.length > 0) {
-      employee.reports.forEach((report) => {
-        console.log(`- ${chalk.green(report.name)} (${report.title})`);
-
-        // Second level (reports of reports)
-        if (report.reports.length > 0) {
-          report.reports.forEach((subReport) => {
-            console.log(`  └─ ${chalk.cyan(subReport.name)} (${subReport.title})`);
-          });
-        }
-      });
-    } else {
-      console.log(chalk.gray('No direct reports'));
-    }
-
-    // Print options
-    const { printAction } = await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'printAction',
-        message: 'What would you like to do?',
-        choices: [
-          { name: 'Print employee details', value: 'print' },
-          { name: 'Print organizational subtree', value: 'subtree' },
-          { name: 'Return to main menu', value: 'return' }
-        ]
-      }
-    ]);
-
-    switch (printAction) {
-      case 'print':
-        this.printEmployeeDetails(employee);
-        break;
-      case 'subtree':
-        this.printSubtree(employee);
-        break;
-      case 'return':
-      default:
-        return;
-    }
-  }
-
-  // Print employee details to a file
-  async printEmployeeDetails(employee) {
-    const { filename } = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'filename',
-        message: 'Enter filename to save the details:',
-        default: `${employee.name.toLowerCase().replace(/\s+/g, '_')}_details.txt`,
-        validate: (input) => input.trim() !== '' || 'Filename cannot be empty'
-      }
-    ]);
-
-    let content = '';
-
-    // Basic information
-    content += `EMPLOYEE DETAILS: ${employee.name.toUpperCase()}\n`;
-    content += `====================${'='.repeat(employee.name.length)}\n\n`;
-    content += `Name: ${employee.name}\n`;
-    content += `Title: ${employee.title}\n`;
-    content += `LOB: ${employee.lob}\n`;
-    content += `Division: ${employee.division}\n`;
-    content += `Department: ${employee.dept}\n`;
-    content += `Email: ${employee.email}\n`;
-    content += `Level: ${employee.level}\n\n`;
-
-    // Organization path
-    content += `ORGANIZATIONAL HIERARCHY:\n`;
-    content += `------------------------\n`;
-    const path = this.orgChart.getPath(employee.name);
-
-    if (path.length > 0) {
-      path.forEach((pathEmployee, index) => {
-        const indent = '  '.repeat(index);
-        content += `${indent}${
-          index === path.length - 1 ? '└─ ' : '├─ '
-        }${pathEmployee.name} (${pathEmployee.title})\n`;
-      });
-    }
-
-    content += '\n';
-
-    // Direct reports
-    content += `DIRECT REPORTS:\n`;
-    content += `--------------\n`;
-    if (employee.reports.length > 0) {
-      employee.reports.forEach((report) => {
-        content += `- ${report.name} (${report.title})\n`;
-
-        // Second level (reports of reports)
-        if (report.reports.length > 0) {
-          report.reports.forEach((subReport) => {
-            content += `  └─ ${subReport.name} (${subReport.title})\n`;
-          });
-        }
-      });
-    } else {
-      content += 'No direct reports\n';
-    }
-
-    content += '\n';
-    content += `Generated on: ${new Date().toLocaleString()}\n`;
-
-    fs.writeFileSync(filename, content);
-    console.log(chalk.green(`Employee details saved to ${filename}`));
-  }
-
-  // Print a subtree of the organization
-  async printSubtree(rootEmployee) {
-    const { filename } = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'filename',
-        message: 'Enter filename to save the subtree:',
-        default: `${rootEmployee.name.toLowerCase().replace(/\s+/g, '_')}_subtree.txt`,
-        validate: (input) => input.trim() !== '' || 'Filename cannot be empty'
-      }
-    ]);
-
-    let content = '';
-
-    // Header
-    content += `ORGANIZATIONAL SUBTREE: ${rootEmployee.name.toUpperCase()}\n`;
-    content += `======================${'='.repeat(rootEmployee.name.length)}\n\n`;
-
-    // Capture console.log output
-    const oldLog = console.log;
-    const logs = [];
-    console.log = (...args) => logs.push(args.join(' '));
-
-    // Print the subtree using the existing print method
-    this._printSubtree(rootEmployee);
-
-    // Restore console.log
-    console.log = oldLog;
-
-    // Add the captured output to the content
-    content += logs.join('\n');
-
-    content += '\n\n';
-    content += `Generated on: ${new Date().toLocaleString()}\n`;
-
-    fs.writeFileSync(filename, content);
-    console.log(chalk.green(`Organizational subtree saved to ${filename}`));
-  }
-
-  // Helper method to print a subtree
-  _printSubtree(node) {
-    this._printNode(node, '', true);
-  }
-
-  // Helper method to print a node (copied from OrgChart to maintain consistency)
-  _printNode(node, prefix, isTail) {
-    // Print current node
-    const connector = isTail ? '└── ' : '├── ';
-    console.log(`${prefix}${connector}${node.name} (${node.title})`);
-
-    // Prepare prefix for children
-    const childPrefix = prefix + (isTail ? '    ' : '│   ');
-
-    // Print children
-    const lastIdx = node.reports.length - 1;
-    node.reports.forEach((report, idx) => {
-      this._printNode(report, childPrefix, idx === lastIdx);
     });
   }
 
-  // Save the org chart to a file
+  // =========================
+  // File Operations
+  // =========================
   async saveOrgChart() {
     if (!this.orgChart.root) {
       console.log(chalk.red('Nothing to save. Please create an org chart first.'));
@@ -930,7 +956,7 @@ class OrgChartApp {
     }
 
     console.clear();
-    console.log(chalk.bold.yellow('Save Org Chart'));
+    console.log(chalk.bold.yellow('Save Org Chart (JSON)'));
 
     const { filename } = await inquirer.prompt([
       {
@@ -942,19 +968,18 @@ class OrgChartApp {
       }
     ]);
 
-    this.orgChart.exportToJSON(filename);
+    await this.orgChart.exportToJSON(filename);
     this.currentFile = filename;
   }
 
-  // Load an org chart from a file
   async loadOrgChart() {
     console.clear();
-    console.log(chalk.bold.yellow('Load Org Chart'));
+    console.log(chalk.bold.yellow('Load Org Chart (JSON)'));
 
-    // Try to list JSON files in the current directory
+    // Attempt to list local JSON files:
     let files = [];
     try {
-      const dirFiles = fs.readdirSync('./');
+      const dirFiles = await fs.readdir('./');
       files = dirFiles.filter((file) => file.endsWith('.json'));
     } catch (err) {
       console.error(chalk.red(`Error reading directory: ${err.message}`));
@@ -973,7 +998,6 @@ class OrgChartApp {
     ]);
 
     let filename = fileChoice;
-
     if (fileChoice === 'custom') {
       const { customFile } = await inquirer.prompt([
         {
@@ -983,17 +1007,59 @@ class OrgChartApp {
           validate: (input) => input.trim() !== '' || 'Filename cannot be empty'
         }
       ]);
-
       filename = customFile;
     }
 
-    const success = this.orgChart.importFromJSON(filename);
+    const success = await this.orgChart.importFromJSON(filename);
     if (success) {
       this.currentFile = filename;
     }
   }
 
-  // Print menu for various report options
+  async importFromCSV() {
+    console.clear();
+    console.log(chalk.bold.yellow('Import from CSV'));
+
+    // Similar file prompts
+    let files = [];
+    try {
+      const dirFiles = await fs.readdir('./');
+      files = dirFiles.filter((file) => file.endsWith('.csv'));
+    } catch (err) {
+      console.error(chalk.red(`Error reading directory: ${err.message}`));
+    }
+
+    let choices = files.map((file) => ({ name: file, value: file }));
+    choices.push({ name: 'Enter a different filename', value: 'custom' });
+
+    const { fileChoice } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'fileChoice',
+        message: 'Select a CSV file to import:',
+        choices: choices
+      }
+    ]);
+
+    let filename = fileChoice;
+    if (fileChoice === 'custom') {
+      const { customFile } = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'customFile',
+          message: 'Enter the CSV filename:',
+          validate: (input) => input.trim() !== '' || 'Filename cannot be empty'
+        }
+      ]);
+      filename = customFile;
+    }
+
+    await this.orgChart.importFromCSV(filename);
+  }
+
+  // =========================
+  // Print Menu / Reports
+  // =========================
   async printMenu() {
     if (!this.orgChart.root) {
       console.log(chalk.red('Org chart is empty. Please create one first.'));
@@ -1010,7 +1076,7 @@ class OrgChartApp {
         message: 'What type of report would you like to print?',
         choices: [
           { name: 'Complete Organization Chart', value: 'full' },
-          { name: 'Department/Manager Subtree', value: 'subtree' },
+          { name: 'Subtree by Manager', value: 'subtree' },
           { name: 'Employee Directory', value: 'directory' },
           { name: 'Statistics Report', value: 'stats' },
           { name: 'Return to main menu', value: 'return' }
@@ -1031,13 +1097,11 @@ class OrgChartApp {
       case 'stats':
         await this.printStatisticsReport();
         break;
-      case 'return':
       default:
-        return;
+        break;
     }
   }
 
-  // Print the full organization chart to a file
   async printFullOrgChart() {
     const { filename } = await inquirer.prompt([
       {
@@ -1049,65 +1113,73 @@ class OrgChartApp {
       }
     ]);
 
-    let content = '';
-
-    // Header
-    content += `ORGANIZATION CHART\n`;
-    content += `=================\n\n`;
-
-    // Capture console.log output
+    let content = 'ORGANIZATION CHART\n==================\n\n';
     const oldLog = console.log;
     const logs = [];
     console.log = (...args) => logs.push(args.join(' '));
 
-    // Print the org chart using the existing print method
     this.orgChart.print();
 
-    // Restore console.log
     console.log = oldLog;
 
-    // Add the captured output to the content
     content += logs.join('\n');
-
-    content += '\n\n';
-    content += `Total Employees: ${Object.keys(this.orgChart.employees).length}\n`;
+    content += `\n\nTotal Employees: ${Object.keys(this.orgChart.employees).length}\n`;
     content += `Generated on: ${new Date().toLocaleString()}\n`;
 
-    fs.writeFileSync(filename, content);
+    await fs.writeFile(filename, content, 'utf8');
     console.log(chalk.green(`Organization chart saved to ${filename}`));
   }
 
-  // Print a subtree report
   async printSubtreeReport() {
-    // Get all employees who have reports
-    const managersChoices = Object.values(this.orgChart.employees)
-      .filter((e) => e.reports.length > 0)
-      .map((e) => ({
-        name: `${e.name} (${e.title}) - ${e.reports.length} direct reports`,
-        value: e.name
-      }));
-
-    if (managersChoices.length === 0) {
-      console.log(chalk.yellow('No managers with reports found in the organization.'));
+    const managers = Object.values(this.orgChart.employees).filter(
+      (e) => e.reports.length > 0
+    );
+    if (!managers.length) {
+      console.log(chalk.yellow('No managers with direct reports found.'));
       return;
     }
+    const managerChoices = managers.map((m) => ({
+      name: `${m.name} (${m.title}) - ${m.reports.length} direct reports`,
+      value: m.id
+    }));
 
-    const { managerName } = await inquirer.prompt([
+    const { managerId } = await inquirer.prompt([
       {
         type: 'list',
-        name: 'managerName',
-        message: 'Select a manager to print their department:',
-        choices: managersChoices
+        name: 'managerId',
+        message: 'Select a manager to print their subtree:',
+        choices: managerChoices
       }
     ]);
 
-    const manager = this.orgChart.employees[managerName];
+    const manager = this.orgChart.employees[managerId];
     if (!manager) return;
 
-    await this.printSubtree(manager);
+    const { filename } = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'filename',
+        message: 'Enter filename to save the subtree:',
+        default: `${manager.name.toLowerCase().replace(/\s+/g, '_')}_subtree.txt`,
+        validate: (input) => input.trim() !== '' || 'Filename cannot be empty'
+      }
+    ]);
+
+    let content = `SUBTREE FOR: ${manager.name}\n=======================\n\n`;
+    const oldLog = console.log;
+    const logs = [];
+    console.log = (...args) => logs.push(args.join(' '));
+
+    this.orgChart.printSubtree(manager);
+
+    console.log = oldLog;
+
+    content += logs.join('\n');
+    content += `\n\nGenerated on: ${new Date().toLocaleString()}\n`;
+    await fs.writeFile(filename, content, 'utf8');
+    console.log(chalk.green(`Subtree saved to ${filename}`));
   }
 
-  // Print an employee directory
   async printEmployeeDirectory() {
     const { filename } = await inquirer.prompt([
       {
@@ -1119,52 +1191,32 @@ class OrgChartApp {
       }
     ]);
 
-    let content = '';
-
-    // Header
-    content += `EMPLOYEE DIRECTORY\n`;
-    content += `=================\n\n`;
-
-    // Sort employees by name
-    const sortedEmployees = Object.values(this.orgChart.employees).sort((a, b) =>
+    let content = 'EMPLOYEE DIRECTORY\n==================\n\n';
+    const sorted = Object.values(this.orgChart.employees).sort((a, b) =>
       a.name.localeCompare(b.name)
     );
 
-    // Add each employee
-    sortedEmployees.forEach((employee, index) => {
-      content += `${index + 1}. ${employee.name}\n`;
-      content += `   Title: ${employee.title}\n`;
-      content += `   LOB: ${employee.lob}\n`;
-      content += `   Division: ${employee.division}\n`;
-      content += `   Department: ${employee.dept}\n`;
-      content += `   Email: ${employee.email}\n`;
-
-      // Manager
-      const manager = this.orgChart._findManager(employee.name);
-      if (manager) {
-        content += `   Reports to: ${manager.name} (${manager.title})\n`;
+    sorted.forEach((emp, idx) => {
+      content += `${idx + 1}. ${emp.name} (${emp.title}) [ID: ${emp.id}]\n`;
+      content += `   LOB: ${emp.lob}\n`;
+      content += `   Division: ${emp.division}\n`;
+      content += `   Department: ${emp.dept}\n`;
+      content += `   Email: ${emp.email}\n`;
+      if (emp.manager) {
+        content += `   Reports to: ${emp.manager.name} (${emp.manager.title})\n`;
       } else {
-        content += `   Reports to: None (Top of organization)\n`;
+        content += `   Reports to: None (CEO)\n`;
       }
-
-      // Add direct reports count
-      if (employee.reports.length > 0) {
-        content += `   Direct reports: ${employee.reports.length}\n`;
-      } else {
-        content += `   Direct reports: None\n`;
-      }
-
-      content += '\n';
+      content += `   Direct reports: ${emp.reports.length || 'None'}\n\n`;
     });
 
-    content += `Total Employees: ${sortedEmployees.length}\n`;
+    content += `Total Employees: ${sorted.length}\n`;
     content += `Generated on: ${new Date().toLocaleString()}\n`;
 
-    fs.writeFileSync(filename, content);
+    await fs.writeFile(filename, content, 'utf8');
     console.log(chalk.green(`Employee directory saved to ${filename}`));
   }
 
-  // Print a statistics report
   async printStatisticsReport() {
     const { filename } = await inquirer.prompt([
       {
@@ -1177,25 +1229,21 @@ class OrgChartApp {
     ]);
 
     const employees = Object.values(this.orgChart.employees);
-
-    // Calculate statistics
     const totalEmployees = employees.length;
     const maxLevel = Math.max(...employees.map((e) => e.level));
 
-    // Count employees by level
-    const employeesByLevel = Array(maxLevel + 1).fill(0);
+    // Count by level
+    const employeesByLevel = new Array(maxLevel + 1).fill(0);
     employees.forEach((e) => {
       employeesByLevel[e.level]++;
     });
 
-    // Average span of control
+    // Count managers
     const managersCount = employees.filter((e) => e.reports.length > 0).length;
     const avgSpan =
-      managersCount > 0
-        ? (totalEmployees - 1) / managersCount // Subtract 1 for the root employee
-        : 0;
+      managersCount > 0 ? (totalEmployees - 1) / managersCount : 0;
 
-    // Find manager with most direct reports
+    // Manager with most direct reports
     let maxReports = 0;
     let managerWithMostReports = null;
     employees.forEach((e) => {
@@ -1205,63 +1253,44 @@ class OrgChartApp {
       }
     });
 
-    let content = '';
+    // Individual contributors
+    const individualContributors = employees.filter((e) => e.reports.length === 0);
 
-    // Header
-    content += `ORGANIZATION STATISTICS REPORT\n`;
-    content += `============================\n\n`;
-
-    // General statistics
-    content += `General Statistics:\n`;
-    content += `-----------------\n`;
+    let content = `ORGANIZATION STATISTICS REPORT\n==============================\n\n`;
     content += `Total Employees: ${totalEmployees}\n`;
     content += `Organization Depth: ${maxLevel + 1} levels\n`;
     content += `Total Managers: ${managersCount}\n`;
-    content += `Average Span of Control: ${avgSpan.toFixed(2)} direct reports per manager\n\n`;
+    content += `Average Span of Control: ${avgSpan.toFixed(2)}\n\n`;
 
-    // Employees by level
     content += `Employees by Level:\n`;
-    content += `-----------------\n`;
     employeesByLevel.forEach((count, level) => {
-      content += `Level ${level}: ${count} employees ${
-        level === 0 ? '(Top level)' : ''
+      content += `  Level ${level}: ${count} employee(s)${
+        level === 0 ? ' (CEO level)' : ''
       }\n`;
     });
     content += '\n';
 
-    // Manager with most direct reports
     if (managerWithMostReports) {
-      content += `Manager with Most Direct Reports:\n`;
-      content += `-------------------------------\n`;
-      content += `${managerWithMostReports.name} (${managerWithMostReports.title}): ${maxReports} direct reports\n\n`;
+      content += `Manager with most direct reports:\n`;
+      content += `  ${managerWithMostReports.name} (${managerWithMostReports.title}) => ${maxReports} reports\n\n`;
     }
 
-    // Employees with no direct reports
-    const individualContributors = employees.filter((e) => e.reports.length === 0);
     content += `Individual Contributors: ${individualContributors.length} (${(
       (individualContributors.length / totalEmployees) *
       100
-    ).toFixed(1)}% of organization)\n\n`;
+    ).toFixed(1)}% of org)\n\n`;
 
     content += `Generated on: ${new Date().toLocaleString()}\n`;
 
-    fs.writeFileSync(filename, content);
+    await fs.writeFile(filename, content, 'utf8');
     console.log(chalk.green(`Statistics report saved to ${filename}`));
-  }
-
-  // Run the application
-  async run() {
-    console.log(chalk.bold.green('Welcome to Terminal Org Chart!'));
-
-    let running = true;
-    while (running) {
-      running = await this.mainMenu();
-    }
-
-    console.log(chalk.bold.green('Thank you for using Terminal Org Chart!'));
   }
 }
 
-// Run the application
-const app = new OrgChartApp();
-app.run();
+// ===========================
+// Run the Application
+// ===========================
+(async () => {
+  const app = new OrgChartApp();
+  await app.run();
+})();
