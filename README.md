@@ -1,67 +1,95 @@
-# Terminal Org Chart
+# Terminal Org Chart App
 
-Terminal Org Chart is a command-line application built with Node.js that allows you to create, manage, and visualize an organization's hierarchical structure directly from your terminal. This tool provides an interactive menu to add, edit, remove, search, and print detailed reports of your organization's chart.
+A feature-rich command-line application for creating, managing, and visualizing organizational hierarchies.
 
 ## Features
 
-- **Create New Org Chart:** Initialize your organization by setting the CEO/root.
-- **Add Employees:** Input employee details including name, title, LOB (Line of Business), division, department, and email.
-- **Edit Employee Details:** Update an employee’s information dynamically.
-- **Remove Employees:** Remove an employee and reassign their direct reports as needed.
-- **Display Org Chart:** Visualize your entire organization hierarchy in the terminal.
-- **Search Functionality:** Quickly find employees by name, title, LOB, division, department, or email.
-- **Export/Import JSON:** Save your org chart to a JSON file and load it later.
-- **Print Reports:** Generate detailed reports including:
-  - Complete organization chart
-  - Department/Manager subtrees
-  - Employee directories
-  - Organizational statistics
+### Employee Management
+- Create organizational charts with hierarchical reporting structures
+- Add, edit, and remove employees with comprehensive details
+- Auto-generated UUIDs for each employee
+- Track employee metadata (name, title, department, division, email, etc.)
+- Seamless handling of reporting relationships
+
+### Search and Navigation
+- Advanced fuzzy search for finding employees quickly
+- Search across all employee fields (name, title, LOB, division, etc.)
+- Intuitive keyboard navigation through menus
+- Back/cancel options at every step
+- Streamlined multi-employee operations
+
+### Data Import/Export
+- Import from CSV with automatic structure detection
+- Import/export to JSON for data persistence
+- Automatic relationship rebuilding during imports
+
+### Reporting
+- Generate full organization charts
+- Create departmental/manager subtree reports
+- Export employee directories
+- Generate organization statistics reports
+- Print individual employee details
+
+### User Experience
+- Color-coded terminal interface for better readability
+- Clear menu structure with organized options
+- Confirmation dialogs for destructive actions
+- Intuitive keyboard shortcuts
+- Consistent navigation patterns
+
+## Dependencies
+
+```json
+{
+  "dependencies": {
+    "chalk": "^4.1.2",      // Terminal text styling and colors
+    "fuse.js": "^7.1.0",    // Fuzzy search functionality
+    "inquirer": "^8.2.6",   // Interactive command line interface
+    "papaparse": "^5.5.2",  // CSV parsing capabilities
+    "uuid": "^11.1.0"       // UUID generation for employees
+  }
+}
+```
 
 ## Installation
 
-1. **Clone the repository:**
-
-   ```bash
-   git clone https://github.com/zacblev1/terminal-org-chart.git
+1. Clone this repository
+2. Install dependencies:
    ```
-
-2. **Navigate into the project directory:**
-
-   ```bash
-   cd terminal-org-chart
-   ```
-
-3. **Install dependencies:**
-
-   ```bash
    npm install
+   ```
+3. Run the application:
+   ```
+   node orgchart.js
    ```
 
 ## Usage
 
-Run the application using Node.js:
+Launch the application and follow the interactive prompts to:
 
-```bash
-node index.js
-```
+1. Create a new organization chart
+2. Add employees to the hierarchy
+3. Visualize the organizational structure
+4. Generate various reports
+5. Import/export data
 
-Once the application starts, you’ll see an interactive menu with options to create a new org chart, add/edit/remove employees, display the org chart, search for employees, and print various reports. Simply follow the on-screen prompts to manage your organization.
+## File Formats
 
-## Dependencies
+### CSV Import Format
+For importing from CSV, your file should include these columns:
+- name (required)
+- title (required)
+- manager (optional, contains the name of the employee's manager)
+- lob (optional)
+- division (optional)
+- dept (optional)
+- email (optional)
+- id (optional, a UUID will be generated if not provided)
 
-- **[chalk](https://www.npmjs.com/package/chalk):** Used for styling terminal output.
-- **[inquirer](https://www.npmjs.com/package/inquirer):** Handles interactive command-line prompts.
-- Node.js built-in modules: `fs`, `path`
-
-## Contributing
-
-Contributions are welcome! Feel free to fork the repository, open issues, or submit pull requests to help improve the project.
+### JSON Structure
+The application uses a hierarchical JSON structure where each employee object contains:
+- Personal details (name, title, id, etc.)
+- A "reports" array containing employee objects that report to them
 
 ## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Thanks to the developers of [chalk](https://github.com/chalk/chalk) and [inquirer](https://github.com/SBoudrias/Inquirer.js) for their fantastic libraries that make this project possible.
-```
+MIT
