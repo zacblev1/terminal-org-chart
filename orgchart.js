@@ -22,7 +22,8 @@ class Employee {
     email = '',
     manager = null
   ) {
-    this.id = uuidv4();       // Unique ID
+    // Generate a fresh UUID by default; it can be overwritten if we have one
+    this.id = uuidv4();
     this.name = name;
     this.title = title;
     this.lob = lob;
@@ -31,6 +32,9 @@ class Employee {
     this.email = email;
     this.manager = manager;
     this.reports = [];
+
+    // If there's a manager, level is manager's level + 1
+    // Otherwise, it's top-level (0)
     this.level = manager ? manager.level + 1 : 0;
   }
 
@@ -48,77 +52,70 @@ class Employee {
 // ===========================
 class OrgChart {
   constructor() {
-    this.root = null;        // CEO or top-level
-    this.employees = {};     // Store employees by ID
-    this.history = [];       // For undo
-    this.future = [];        // For redo
+    this.root = null;        // CEO or top-level employee
+    this.employees = {};     // Map of ID -> Employee
+    this.history = [];       // For Undo
+    this.future = [];        // For Redo
   }
 
-  // -------------------------
-  // Undo/Redo Helpers
-  // -------------------------
-  /**
-   * Push the current org structure onto a history stack
-   * so we can revert to it later (undo).
-   */
+  // --------------------------------------------------
+  //                   Undo/Redo
+  // --------------------------------------------------
   pushState() {
     const snapshot = this._serializeOrg();
     this.history.push(snapshot);
-    // Clear the "redo" stack when a new action is taken
+    // Clear "redo" stack on each new action
     this.future = [];
   }
 
-  /**
-   * Undo: revert to the previous snapshot if available
-   */
   undo() {
     if (this.history.length < 2) {
       console.log(chalk.yellow('Nothing to undo.'));
       return false;
     }
-    // Remove current state, push it into future
+
+    // Pop the current state, push to future
     const current = this.history.pop();
     this.future.push(current);
 
-    // The last item in history is now the prior state
+    // The previous item is now our active state
     const previous = this.history[this.history.length - 1];
     this._loadSnapshot(previous);
+
     console.log(chalk.green('Undo successful.'));
     return true;
   }
 
-  /**
-   * Redo: re-apply a state that was undone
-   */
   redo() {
     if (this.future.length === 0) {
       console.log(chalk.yellow('Nothing to redo.'));
       return false;
     }
-    // Pop from future into history, load it
+
+    // Pop from future, push to history
     const snapshot = this.future.pop();
     this.history.push(snapshot);
     this._loadSnapshot(snapshot);
+
     console.log(chalk.green('Redo successful.'));
     return true;
   }
 
-  // Helper to convert entire org to JSON string
+  // Convert the entire org to a JSON string
   _serializeOrg() {
-    // We'll use the root node's nested structure
     return JSON.stringify(this._prepareForExport(), null, 2);
   }
 
-  // Helper to reload org from a JSON snapshot
+  // Load a given JSON snapshot (reverse of _serializeOrg)
   _loadSnapshot(snapshot) {
     const orgObj = JSON.parse(snapshot);
     this.employees = {};
     this._recreateFromJSON(orgObj);
   }
 
-  // -------------------------
-  // Basic Org Methods
-  // -------------------------
+  // --------------------------------------------------
+  //                   Basic Methods
+  // --------------------------------------------------
   setRoot(employee) {
     this.root = employee;
     this.employees[employee.id] = employee;
@@ -126,22 +123,18 @@ class OrgChart {
     this.pushState();
   }
 
-  /**
-   * Add a new employee under managerId. If managerId is null or undefined,
-   * but we already have a root, default to root.
-   */
   addEmployee(name, title, managerId, lob, division, dept, email) {
-    // If we have no root, block creation until setRoot is used
     if (!this.root) {
       console.log(chalk.red('No CEO/root exists. Create a new org chart first.'));
       return null;
     }
 
-    this.pushState(); // Before we modify
+    // Save snapshot before modifying
+    this.pushState();
 
+    // Find the manager by ID; fallback to root if none
     let manager = this.employees[managerId];
     if (!manager) {
-      // If not found or no manager specified, default to root
       manager = this.root;
     }
 
@@ -153,13 +146,8 @@ class OrgChart {
     return employee;
   }
 
-  /**
-   * Remove an employee by ID. Optionally reassign their reports to newManagerId.
-   * If newManagerId is not provided, their reports are left orphaned
-   * or removed from the org (depending on your business rules).
-   */
   removeEmployee(employeeId, newManagerId = null) {
-    // Block if they try to remove the root
+    // Block removing the root
     if (this.root && this.root.id === employeeId) {
       console.log(chalk.red('Cannot remove the root (CEO).'));
       return false;
@@ -173,39 +161,31 @@ class OrgChart {
 
     this.pushState();
 
-    // Reassign direct reports if needed
+    // Reassign direct reports if requested
     if (newManagerId && this.employees[newManagerId]) {
       const newManager = this.employees[newManagerId];
       employee.reports.forEach((r) => {
         newManager.addReport(r);
       });
     } else {
-      // If no reassignment, we detach them (their manager set to null),
-      // or remove them from org entirely. Here we just remove them from org:
+      // If no reassignment, we detach them
       employee.reports.forEach((r) => {
-        // removing them as well or making them root might be custom logic
         r.manager = null;
       });
     }
 
-    // Remove from old manager's reports
+    // Remove from the old manager's reports
     if (employee.manager) {
-      employee.manager.reports = employee.manager.reports.filter(
-        (r) => r.id !== employee.id
-      );
+      employee.manager.reports = employee.manager.reports.filter((r) => r.id !== employee.id);
     }
 
-    // Finally, remove from dictionary
+    // Remove from the main dictionary
     delete this.employees[employeeId];
 
     console.log(chalk.green(`Removed "${employee.name}".`));
     return true;
   }
 
-  /**
-   * Edit an employee’s details by ID.
-   * If the name changes, we just overwrite the name in the object.
-   */
   editEmployee(employeeId, newData) {
     const employee = this.employees[employeeId];
     if (!employee) {
@@ -215,7 +195,7 @@ class OrgChart {
 
     this.pushState();
 
-    // Just update fields if they’re provided
+    // Update fields if present
     if (typeof newData.name === 'string') {
       employee.name = newData.name.trim() || employee.name;
     }
@@ -239,9 +219,6 @@ class OrgChart {
     return true;
   }
 
-  /**
-   * Move an entire subtree (employee + reports) under a new manager.
-   */
   moveSubtree(employeeId, newManagerId) {
     const employee = this.employees[employeeId];
     const newManager = this.employees[newManagerId];
@@ -250,84 +227,77 @@ class OrgChart {
       return false;
     }
 
-    // Prevent moving the root
     if (employee === this.root) {
       console.log(chalk.red('Cannot move the root (CEO).'));
       return false;
     }
 
-    // Check if newManager is a descendant of employee (which would create a cycle)
-    if (employee === newManager || this._isDescendant(employee, newManager)) {
+    // Check if newManager is a descendant of employee to prevent cycles
+    if (employee.id === newManager.id || this._isDescendant(employee, newManager)) {
       console.log(chalk.red('Cannot reassign to a subordinate or self.'));
       return false;
     }
 
     this.pushState();
 
-    // 1) Remove from old manager
+    // 1) Remove the employee from the old manager's reports
     if (employee.manager) {
-      employee.manager.reports = employee.manager.reports.filter((r) => r !== employee);
+      employee.manager.reports = employee.manager.reports.filter((r) => r.id !== employee.id);
     }
 
-    // 2) Add to new manager
+    // 2) Attach to new manager
     newManager.addReport(employee);
 
-    // 3) Update levels in subtree
+    // 3) Update levels in the subtree
     this._updateLevels(employee, newManager.level + 1);
 
     console.log(chalk.green(`Moved "${employee.name}" under "${newManager.name}".`));
     return true;
   }
 
-  // Helper to check if candidate is a descendant of root
+  // Check if 'candidate' is somewhere in 'root's subtree, by comparing IDs
   _isDescendant(root, candidate) {
-    if (root.reports.length === 0) return false;
     for (const r of root.reports) {
-      if (r === candidate) return true;
+      // Compare IDs to accommodate re-created objects
+      if (r.id === candidate.id) return true;
       if (this._isDescendant(r, candidate)) return true;
     }
     return false;
   }
 
-  // Recursive update of levels
   _updateLevels(node, level) {
     node.level = level;
     node.reports.forEach((r) => this._updateLevels(r, level + 1));
   }
 
-  /**
-   * Get the chain of managers up to the root for a given employee.
-   */
+  // Return the chain of managers up to root
   getPath(employeeId) {
     const path = [];
     let current = this.employees[employeeId];
     while (current) {
       path.unshift(current);
-      current = current.manager; // direct manager reference
+      current = current.manager;
     }
     return path;
   }
 
-  // -------------------------
-  // Searching (Fuzzy & Basic)
-  // -------------------------
-  /**
-   * Fuzzy search across name, title, lob, division, dept, email.
-   */
+  // --------------------------------------------------
+  //                    Searching
+  // --------------------------------------------------
   search(query) {
     const employeesArray = Object.values(this.employees);
     const fuse = new Fuse(employeesArray, {
       keys: ['name', 'title', 'lob', 'division', 'dept', 'email'],
       includeScore: true,
-      threshold: 0.3 // Adjust threshold for how fuzzy you want the match
+      threshold: 0.3
     });
     const results = fuse.search(query);
     return results.map((r) => r.item);
   }
 
-  // -------------------------
-  // Printing
-  // -------------------------
+  // --------------------------------------------------
+  //                    Printing
+  // --------------------------------------------------
   print() {
     if (!this.root) {
       console.log(chalk.red('Organization chart is empty. Add a CEO first.'));
@@ -347,13 +317,12 @@ class OrgChart {
     });
   }
 
-  // Print a subtree given an employee
+  // Print a subtree (plain text)
   printSubtree(employee) {
     this._printSubtree(employee, '', true);
   }
 
   _printSubtree(node, prefix, isTail) {
-    // Basic text output, no coloring for capturing in logs
     const connector = isTail ? '└── ' : '├── ';
     console.log(`${prefix}${connector}${node.name} (${node.title})`);
     const childPrefix = prefix + (isTail ? '    ' : '│   ');
@@ -362,9 +331,9 @@ class OrgChart {
     });
   }
 
-  // -------------------------
-  // Export/Import
-  // -------------------------
+  // --------------------------------------------------
+  //               Export / Import (JSON)
+  // --------------------------------------------------
   async exportToJSON(filename) {
     if (!this.root) {
       console.log(chalk.red('No org chart to export.'));
@@ -379,10 +348,6 @@ class OrgChart {
     }
   }
 
-  /**
-   * Convert the root (and subtree) to a plain JS object
-   * that includes all fields, so we can fully reconstruct it.
-   */
   _prepareForExport() {
     const serializeNode = (node) => ({
       id: node.id,
@@ -403,8 +368,10 @@ class OrgChart {
       const data = await fs.readFile(filename, 'utf8');
       const obj = JSON.parse(data);
       this.employees = {};
+
       this._recreateFromJSON(obj);
-      // After successful import, push state to history
+
+      // After successful import, push a new snapshot
       this.pushState();
       console.log(chalk.green(`Org chart imported from ${filename}`));
       return true;
@@ -424,9 +391,11 @@ class OrgChart {
       obj.email,
       manager
     );
-    // Overwrite auto-generated ID with the one from the JSON
+    // Overwrite the auto-generated ID with the original
     employee.id = obj.id;
-    employee.level = obj.level; // can recalc if you want
+    // Overwrite the level (optional, or we can recalc)
+    employee.level = obj.level;
+
     this.employees[employee.id] = employee;
 
     if (!manager) {
@@ -435,7 +404,7 @@ class OrgChart {
       manager.reports.push(employee);
     }
 
-    if (obj.reports && obj.reports.length > 0) {
+    if (obj.reports && Array.isArray(obj.reports)) {
       obj.reports.forEach((child) => {
         this._recreateFromJSON(child, employee);
       });
@@ -443,14 +412,14 @@ class OrgChart {
     return employee;
   }
 
-  // -------------------------
-  // CSV Import
-  // -------------------------
+  // --------------------------------------------------
+  //               CSV Import (Improved)
+  // --------------------------------------------------
   /**
-   * Load employees in bulk from a CSV.
-   * Each row should have columns:
+   * CSV must have columns:
    *   name, title, managerName, lob, division, dept, email
-   * If managerName is missing or not found, we default to root.
+   * We do a multi-pass approach to ensure that employees
+   * can be added only after their manager exists.
    */
   async importFromCSV(filename) {
     try {
@@ -463,36 +432,73 @@ class OrgChart {
         return false;
       }
 
-      this.pushState();
+      this.pushState(); // Snapshot before bulk import
 
-      rows.forEach((row) => {
-        const name = row.name?.trim() || '';
-        const title = row.title?.trim() || '';
-        const managerName = row.managerName?.trim() || '';
-        const lob = row.lob?.trim() || '';
-        const division = row.division?.trim() || '';
-        const dept = row.dept?.trim() || '';
-        const email = row.email?.trim() || '';
+      // Convert rows to a normalized array
+      let pending = rows.map((row) => ({
+        name: row.name?.trim() || '',
+        title: row.title?.trim() || '',
+        managerName: row.managerName?.trim() || '',
+        lob: row.lob?.trim() || '',
+        division: row.division?.trim() || '',
+        dept: row.dept?.trim() || '',
+        email: row.email?.trim() || ''
+      }));
 
-        if (!name || !title) {
-          // Skip invalid row
-          return;
+      // We'll keep looping until we can't add any more or we've exhausted the list
+      let addedAny = true;
+      while (pending.length && addedAny) {
+        addedAny = false;
+
+        for (let i = pending.length - 1; i >= 0; i--) {
+          const { name, title, managerName, lob, division, dept, email } = pending[i];
+          if (!name || !title) {
+            // Invalid row, remove it
+            pending.splice(i, 1);
+            continue;
+          }
+
+          let managerId = null;
+
+          // If we have a managerName, try to find them by name
+          if (managerName) {
+            const manager = Object.values(this.employees).find(
+              (emp) => emp.name.toLowerCase() === managerName.toLowerCase()
+            );
+
+            // If the manager is not yet in the org, skip for now
+            if (!manager) {
+              continue;
+            }
+            managerId = manager.id;
+          }
+
+          // If managerName is empty or not found, default to root
+          if (!managerName || !managerId) {
+            managerId = this.root ? this.root.id : null;
+          }
+
+          // Add the employee
+          this.addEmployee(name, title, managerId, lob, division, dept, email);
+          // Remove from pending
+          pending.splice(i, 1);
+          addedAny = true;
         }
+      }
 
-        // Find manager by name
-        let managerId = null;
-        // Attempt to find manager in existing employees by name
-        const manager = Object.values(this.employees).find(
-          (emp) => emp.name.toLowerCase() === managerName.toLowerCase()
+      // If any rows remain, their managers were never found
+      if (pending.length > 0) {
+        console.log(
+          chalk.red(
+            `Unable to import ${pending.length} row(s) because their manager(s) were not found or invalid.`
+          )
         );
-        if (manager) {
-          managerId = manager.id;
-        }
+      }
 
-        this.addEmployee(name, title, managerId, lob, division, dept, email);
-      });
-
-      console.log(chalk.green(`Imported from CSV: ${rows.length} rows processed.`));
+      const importedCount = rows.length - pending.length;
+      console.log(
+        chalk.green(`Imported from CSV: ${importedCount} row(s) processed, ${pending.length} could not be imported.`)
+      );
       return true;
     } catch (err) {
       console.error(chalk.red(`Error importing CSV: ${err.message}`));
@@ -502,12 +508,12 @@ class OrgChart {
 }
 
 // ===========================
-// OrgChartApp Class
+// OrgChartApp Class (CLI)
 // ===========================
 class OrgChartApp {
   constructor() {
     this.orgChart = new OrgChart();
-    this.currentFile = null; // track current JSON file
+    this.currentFile = null; // track the currently loaded JSON
   }
 
   async run() {
@@ -598,7 +604,7 @@ class OrgChartApp {
     }
 
     if (action !== 'exit') {
-      // Wait for user to press Enter
+      // Pause before returning to main menu
       await inquirer.prompt([
         {
           type: 'confirm',
@@ -612,9 +618,9 @@ class OrgChartApp {
     return false;
   }
 
-  // =========================
-  // Org Functions
-  // =========================
+  // --------------------------------------------------
+  //              Org Chart Functions
+  // --------------------------------------------------
   async createNewOrgChart() {
     console.clear();
     console.log(chalk.bold.yellow('Create a New Org Chart'));
@@ -658,7 +664,7 @@ class OrgChartApp {
       }
     ]);
 
-    // Reset the entire chart
+    // Reset the org
     this.orgChart = new OrgChart();
     const ceo = new Employee(name, title, lob, division, dept, email, null);
     this.orgChart.setRoot(ceo);
@@ -669,13 +675,13 @@ class OrgChartApp {
 
   async addEmployee() {
     if (!this.orgChart.root) {
-      console.log(chalk.red('Please create a new org chart first'));
+      console.log(chalk.red('Please create a new org chart first.'));
       return;
     }
     console.clear();
     console.log(chalk.bold.yellow('Add an Employee'));
 
-    // Prepare manager choices
+    // List all employees as potential managers
     const managerChoices = Object.values(this.orgChart.employees).map((e) => ({
       name: `${e.name} (${e.title})`,
       value: e.id
@@ -732,7 +738,7 @@ class OrgChartApp {
 
   async editEmployee() {
     if (!this.orgChart.root) {
-      console.log(chalk.red('Please create a new org chart first'));
+      console.log(chalk.red('Please create a new org chart first.'));
       return;
     }
     console.log(chalk.bold.yellow('Edit an Employee'));
@@ -806,12 +812,12 @@ class OrgChartApp {
 
   async moveSubtree() {
     if (!this.orgChart.root) {
-      console.log(chalk.red('Please create a new org chart first'));
+      console.log(chalk.red('Please create a new org chart first.'));
       return;
     }
     console.log(chalk.bold.yellow('Move a Subtree'));
 
-    // Choose an employee to move (except the root)
+    // Cannot move the root, so filter it out
     const employeeChoices = Object.values(this.orgChart.employees)
       .filter((e) => e !== this.orgChart.root)
       .map((e) => ({
@@ -854,11 +860,12 @@ class OrgChartApp {
 
   async removeEmployee() {
     if (!this.orgChart.root) {
-      console.log(chalk.red('Please create a new org chart first'));
+      console.log(chalk.red('Please create a new org chart first.'));
       return;
     }
     console.log(chalk.bold.yellow('Remove an Employee'));
 
+    // Filter out the root from removal
     const employeeChoices = Object.values(this.orgChart.employees)
       .filter((e) => e !== this.orgChart.root)
       .map((e) => ({
@@ -888,6 +895,7 @@ class OrgChartApp {
 
     let newManagerId = null;
     if (reassignReports) {
+      // Choose a new manager for these direct reports
       const managerChoices = Object.values(this.orgChart.employees)
         .filter((e) => e.id !== employeeId)
         .map((e) => ({
@@ -938,7 +946,7 @@ class OrgChartApp {
       return;
     }
 
-    console.log(chalk.green(`Found ${results.length} matches:`));
+    console.log(chalk.green(`Found ${results.length} match(es):`));
     results.forEach((emp, idx) => {
       console.log(
         chalk.bold(`${idx + 1}. ${emp.name} (${emp.title}) - [ID: ${emp.id}]`)
@@ -946,9 +954,9 @@ class OrgChartApp {
     });
   }
 
-  // =========================
-  // File Operations
-  // =========================
+  // --------------------------------------------------
+  //               File Operations
+  // --------------------------------------------------
   async saveOrgChart() {
     if (!this.orgChart.root) {
       console.log(chalk.red('Nothing to save. Please create an org chart first.'));
@@ -976,7 +984,6 @@ class OrgChartApp {
     console.clear();
     console.log(chalk.bold.yellow('Load Org Chart (JSON)'));
 
-    // Attempt to list local JSON files:
     let files = [];
     try {
       const dirFiles = await fs.readdir('./');
@@ -1020,7 +1027,6 @@ class OrgChartApp {
     console.clear();
     console.log(chalk.bold.yellow('Import from CSV'));
 
-    // Similar file prompts
     let files = [];
     try {
       const dirFiles = await fs.readdir('./');
@@ -1057,9 +1063,9 @@ class OrgChartApp {
     await this.orgChart.importFromCSV(filename);
   }
 
-  // =========================
-  // Print Menu / Reports
-  // =========================
+  // --------------------------------------------------
+  //                  Print Menu
+  // --------------------------------------------------
   async printMenu() {
     if (!this.orgChart.root) {
       console.log(chalk.red('Org chart is empty. Please create one first.'));
@@ -1138,6 +1144,7 @@ class OrgChartApp {
       console.log(chalk.yellow('No managers with direct reports found.'));
       return;
     }
+
     const managerChoices = managers.map((m) => ({
       name: `${m.name} (${m.title}) - ${m.reports.length} direct reports`,
       value: m.id
@@ -1192,6 +1199,8 @@ class OrgChartApp {
     ]);
 
     let content = 'EMPLOYEE DIRECTORY\n==================\n\n';
+
+    // Sort by name for a neat directory
     const sorted = Object.values(this.orgChart.employees).sort((a, b) =>
       a.name.localeCompare(b.name)
     );
@@ -1230,8 +1239,14 @@ class OrgChartApp {
 
     const employees = Object.values(this.orgChart.employees);
     const totalEmployees = employees.length;
-    const maxLevel = Math.max(...employees.map((e) => e.level));
 
+    // If no employees, skip
+    if (!employees.length) {
+      console.log(chalk.red('No employees to generate statistics on.'));
+      return;
+    }
+
+    const maxLevel = Math.max(...employees.map((e) => e.level));
     // Count by level
     const employeesByLevel = new Array(maxLevel + 1).fill(0);
     employees.forEach((e) => {
@@ -1240,10 +1255,9 @@ class OrgChartApp {
 
     // Count managers
     const managersCount = employees.filter((e) => e.reports.length > 0).length;
-    const avgSpan =
-      managersCount > 0 ? (totalEmployees - 1) / managersCount : 0;
+    const avgSpan = managersCount > 0 ? (totalEmployees - 1) / managersCount : 0;
 
-    // Manager with most direct reports
+    // Manager with the most direct reports
     let maxReports = 0;
     let managerWithMostReports = null;
     employees.forEach((e) => {
